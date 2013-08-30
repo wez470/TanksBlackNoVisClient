@@ -8,8 +8,6 @@ import javax.swing.JOptionPane; //JOptionPane
 import sprites.utils.*; //Sprite
 import sprites.*; //Sprite
 
-import SimpleOpenNI.*; //Kinect
-import monclubelec.javacvPro.*; //Opencv
 import java.awt.*; //Rectangle
 import java.util.concurrent.*; //ConcurrentHashMap
 import java.util.LinkedList; //LinkedList
@@ -21,6 +19,7 @@ ControllStick turretStick;
 ControllStick moveStick;
 StopWatch timer;
 color backgroundColor = color(213, 189, 122);
+color black = color(0, 0, 0);
 color[] tankColors = new color[]{color(40, 150, 30), color(220, 150, 30), color(165, 50, 50), color(67, 90, 229)};
 color[] tankBackgroundColors = new color[]{color(139, 148, 82), color(186, 154, 84), color(166, 125, 84), color(137, 127, 113)};
 ConcurrentHashMap<Integer, Bullet> bullets;
@@ -44,12 +43,6 @@ float prevRot = 1000.0;
 float prevDirection = 1000.0;
 float prevMagnitude = 1000.0;
 int controllerUsedTimer = 0;
-SimpleOpenNI cam;
-OpenCV opencv; 
-ImageProcessingThread imgProcThread;
-boolean waiting = true;
-Rectangle[] faceRect;
-int currNumFaces = 0;
 boolean looking = true;
 int timeSinceNotLooking = 0;
 int timeSinceLooking = 0;
@@ -73,7 +66,13 @@ boolean drawCircles = false;
 boolean drawNotSeenKills = false;
 boolean invincible = false;
 boolean disattentionOverride = false;
-boolean testMode = true;
+boolean testMode = false;
+LinkedList<Integer> blackoutTimes;
+int blackoutTimer;
+int blackoutDuration;
+boolean blackout = false;
+boolean saveAfterFrame = false;
+int invincibleTimer = 0;
 
 /**
  * Setup the game for play
@@ -82,16 +81,6 @@ void setup()
 {
   size(800, 600);
   //size((int) (screen.height * 4.0 / 3.0), screen.height);
-  
-  cam = new SimpleOpenNI(this); //initialize kinect camera
-  cam.setMirror(true);
-  cam.enableRGB();
-  opencv = new OpenCV(this);
-  opencv.allocate(cam.rgbWidth(), cam.rgbHeight()); //size of image buffer
-  opencv.cascade("C:/opencv/data/haarcascades/", "haarcascade_frontalface_alt_tree.xml"); //initialize detection of face
-  imgProcThread = new ImageProcessingThread();
-  imgProcThread.setPriority(Thread.MIN_PRIORITY);
-  imgProcThread.start();
   
   bullets = new ConcurrentHashMap<Integer, Bullet>();
   bulletIDs = new HashMap<Bullet, Integer>();
@@ -103,10 +92,12 @@ void setup()
   scores = new Score[4];
   
   timer = new StopWatch();
+  blackoutTimer = (int)random(5000, 55000);
   
   setupController();
   setupWalls();
   setupPowerUps();
+  setupBlackoutTimes();
 
   powerUpGrey = loadImage("Images/PowerUpNotLooking.png");
   powerUpRedGrey = loadImage("Images/PowerUpNotLookingReset.png");
@@ -128,6 +119,11 @@ void setup()
       {
         Network.RotateClientMsg rotateMsg = (Network.RotateClientMsg) object;
         int playerNum = rotateMsg.player;
+        if(tanks[playerNum - 1] == null)
+        {
+          tanks[playerNum - 1] = newTank(playerNum);
+          numPlayers++;
+        }
         tanks[playerNum - 1].tankTurret.setRot(rotateMsg.turretRot);
       }
       else if(object instanceof Network.HitBulletMsg || object instanceof Network.HitWallMsg || object instanceof Network.HitTankMsg || object instanceof Network.HitPowerUpMsg)
@@ -168,8 +164,7 @@ void setup()
       }
     }
   });
-  //String inputIP = JOptionPane.showInputDialog(this, "Enter the IP address to connect to");
-  String inputIP = "127.0.0.1";
+  String inputIP = JOptionPane.showInputDialog(this, "Enter the IP address to connect to");
   try
   {
     client.connect(5000, inputIP, Network.TCPPort, Network.UDPPort);
@@ -178,6 +173,14 @@ void setup()
   {
     e.printStackTrace();
   }
+}
+
+/** 
+ * A method to get the current time as a string
+ */
+String time()
+{
+  return hour() + "h_" + minute() + "m_" + second() + "s";
 }
 
 /**
@@ -218,6 +221,17 @@ void setupWalls()
     walls.put(i + 1, wall);
     wallIDs.put(wall, i + 1);
   }
+}
+
+/**
+ * Sets up the blackout times
+ */
+void setupBlackoutTimes()
+{
+  blackoutTimes = new LinkedList<Integer>();
+  blackoutTimes.add(1);
+  blackoutTimes.add(5);
+  blackoutTimes.add(10);
 }
 
 /**
@@ -300,22 +314,25 @@ void setupController()
 void handleRBPress()
 {
   controllerUsedTimer = millis();
-  if(millis() - powerUpTimer < 10000)
+  if(!blackout)
   {
-    if(millis() - shotTimer > 350)
+    if(millis() - powerUpTimer < 10000)
     {
-      Network.ShootServerMsg shootMsg = new Network.ShootServerMsg();
-      client.sendTCP(shootMsg);
-      shotTimer = millis();      
+      if(millis() - shotTimer > 350)
+      {
+        Network.ShootServerMsg shootMsg = new Network.ShootServerMsg();
+        client.sendTCP(shootMsg);
+        shotTimer = millis();      
+      }
     }
-  }
-  else
-  {
-    if(millis() - shotTimer > 700)
+    else
     {
-      Network.ShootServerMsg shootMsg = new Network.ShootServerMsg();
-      client.sendTCP(shootMsg);
-      shotTimer = millis();
+      if(millis() - shotTimer > 700)
+      {
+        Network.ShootServerMsg shootMsg = new Network.ShootServerMsg();
+        client.sendTCP(shootMsg);
+        shotTimer = millis();
+      }
     }
   }
 }
@@ -403,136 +420,159 @@ void processUpdateClientMsg(Network.UpdateClientMsg updateMsg)
  */
 void draw()
 {
-  deltaTime = (float) timer.getElapsedTime();
-  background(backgroundColor);
-  processUserGameInput(deltaTime);
-  if(drawCircles)
+  if(millis() - blackoutTimer >= 0)
   {
-    ellipseMode(CENTER);
+    saveFrame("log/" + time() + ".png");
+    blackout = true;
+    client.sendTCP(new Network.StopMsg());
+    blackoutTimer += 60000;
+    int i = min(blackoutTimes.size() - 1, (int)random(0, blackoutTimes.size()));
+    blackoutDuration = blackoutTimes.get(i) * 1000 + millis();
+    blackoutTimes.remove(i);
+    if(blackoutTimes.isEmpty())
+    {
+      setupBlackoutTimes();
+    }
+  }
+  deltaTime = (float) timer.getElapsedTime();
+  if(blackout)
+  {
+    attentionUpdate();
+    background(black);
+    if(millis() - blackoutDuration >= 0)
+    {
+      blackout = false;
+      saveAfterFrame = true;
+    }
+    for(Bullet currBullet: bullets.values())
+    {
+      currBullet.bullet.update(deltaTime);
+    }  
+  }
+  else
+  {
+    background(backgroundColor);
+    processUserGameInput(deltaTime);
+    if(drawCircles)
+    {
+      ellipseMode(CENTER);
+      for(int i = 0; i < 4; i++)
+      {
+        if(tanks[i] != null)
+        {
+          noStroke();
+          fill(tankBackgroundColors[i]);
+//          ellipse((float)tanks[i].tankBase.getX(), (float)tanks[i].tankBase.getY(), 300 * scaleSize, 300 * scaleSize);
+          pushMatrix();
+          translate((int)tanks[i].tankBase.getX(), (int)tanks[i].tankBase.getY());
+          rotate((float)tanks[i].tankTurret.getRot() + PI);
+//          rect(-11.0, 0.0, 22, 80.0);
+          popMatrix();
+        }
+      }
+    }
+    for(int i = 0; i < 4; i++)
+    {
+      if(tanks[i] != null && tanks[i].invincible)
+      {
+        ellipseMode(CENTER);
+        stroke(0, 140, 255, 255);
+        strokeWeight(2);
+        fill(0, 0, 0, 0);
+        ellipse((float)tanks[i].tankBase.getX(), (float)tanks[i].tankBase.getY(), 350 * scaleSize, 350 * scaleSize);
+      }
+    }
+    for(Line currLine: tankTrails)
+    {
+//      currLine.draw();
+    }
+    for(Line currLine: bulletTrails)
+    {
+//      currLine.draw();
+    }
+    for(Sprite currPowerUp: powerUps.values())
+    {
+      currPowerUp.draw();
+    }
+    if(powerUpTaken && powerUpTakenIndex > 0)
+    {
+//      image(powerUpGrey, 0.5 * width, 0.5 * height, powerUpGrey.width * 3.75 * scaleSize, powerUpGrey.height * 3.75 * scaleSize);
+    }
+    else if(!powerUpTaken && powerUpTakenIndex > 0)
+    {
+//      image(powerUpRedGrey, 0.5 * width, 0.5 * height, powerUpRedGrey.width * 3.75 * scaleSize, powerUpRedGrey.height * 3.75 * scaleSize);
+    }
+    synchronized(deadTanks)
+    {
+      for(DeadTank deadTank: deadTanks)
+      {
+//        deadTank.draw();
+      }
+    }
     for(int i = 0; i < 4; i++)
     {
       if(tanks[i] != null)
       {
-        noStroke();
-        fill(tankBackgroundColors[i]);
-        ellipse((float)tanks[i].tankBase.getX(), (float)tanks[i].tankBase.getY(), 300 * scaleSize, 300 * scaleSize);
-        pushMatrix();
-        translate((int)tanks[i].tankBase.getX(), (int)tanks[i].tankBase.getY());
-        rotate((float)tanks[i].tankTurret.getRot() + PI);
-        rect(-11.0, 0.0, 22, 80.0);
-        popMatrix();
+        tanks[i].drawBase();
       }
     }
-  }
-  for(int i = 0; i < 4; i++)
-  {
-    if(tanks[i] != null && tanks[i].invincible)
+    for(Wall currWall: walls.values())
     {
-      ellipseMode(CENTER);
-      stroke(0, 140, 255, 255);
-      strokeWeight(2);
-      fill(0, 0, 0, 0);
-      ellipse((float)tanks[i].tankBase.getX(), (float)tanks[i].tankBase.getY(), 350 * scaleSize, 350 * scaleSize);
+      currWall.draw();
     }
-  }
-  for(Line currLine: tankTrails)
-  {
-    currLine.draw();
-  }
-  for(Line currLine: bulletTrails)
-  {
-    currLine.draw();
-  }
-  for(Sprite currPowerUp: powerUps.values())
-  {
-    currPowerUp.draw();
-  }
-  if(powerUpTaken && powerUpTakenIndex > 0)
-  {
-    image(powerUpGrey, 0.5 * width, 0.5 * height, powerUpGrey.width * 3.75 * scaleSize, powerUpGrey.height * 3.75 * scaleSize);
-  }
-  else if(!powerUpTaken && powerUpTakenIndex > 0)
-  {
-    image(powerUpRedGrey, 0.5 * width, 0.5 * height, powerUpRedGrey.width * 3.75 * scaleSize, powerUpRedGrey.height * 3.75 * scaleSize);
-  }
-  synchronized(deadTanks)
-  {
-    for(DeadTank deadTank: deadTanks)
+    for(int i = 0; i < 4; i++)
     {
-      deadTank.draw();
-    }
-  }
-  for(int i = 0; i < 4; i++)
-  {
-    if(tanks[i] != null)
-    {
-      tanks[i].drawBase();
-    }
-  }
-  for(Wall currWall: walls.values())
-  {
-    currWall.draw();
-  }
-  for(int i = 0; i < 4; i++)
-  {
-    if(tanks[i] != null)
-    {
-      tanks[i].drawHealth();
-    }
-  }
-  for(int i = 0; i < 4; i++)
-  {
-    if(tanks[i] != null)
-    {
-      tanks[i].drawTurret();
-    }
-  }
-  attentionUpdate();
-  drawText();
-  PriorityQueue<Score> orderedScores = new PriorityQueue<Score>(4);
-  for(int i = 0; i < 4; i++)
-  {
-    if(scores[i] != null)
-    {
-      orderedScores.add(scores[i]);
-    }
-  }
-  int numScores = numPlayers - 1;
-  for(int i = 0; i < 4; i++)
-  {
-    if(scores[i] != null)
-    {
-      fill(0, 0, 0, 210);
-      textSize(48 * scaleSize);
-      textAlign(LEFT);
-      if(drawNotSeenKills)
+      if(tanks[i] != null)
       {
-        Score currScore = orderedScores.poll();
-        text(currScore.toString() + " +" + currScore.notSeenKills, 4 * scaleSize, height - 16 * scaleSize - 48 * numScores * scaleSize);        
+        tanks[i].drawHealth();
       }
-      else
-      {
-        text(orderedScores.poll().toString(), 4 * scaleSize, height - 16 * scaleSize - 48 * numScores * scaleSize);
-      }
-      numScores--;
     }
-  }
-  for(Bullet currBullet: bullets.values())
-  {
-    currBullet.bullet.update(deltaTime);
-    currBullet.bullet.draw();
-  }  
-  if(imgProcIndex >= 20 && waiting)
-  {
-    synchronized(imgProcThread)
+    for(int i = 0; i < 4; i++)
     {
-      imgProcThread.notify();
+      if(tanks[i] != null)
+      {
+        tanks[i].drawTurret();
+      }
     }
-    imgProcIndex = 0;
-  }
-  else
-  {
-    imgProcIndex++;
+    attentionUpdate();
+    drawText();
+    PriorityQueue<Score> orderedScores = new PriorityQueue<Score>(4);
+    for(int i = 0; i < 4; i++)
+    {
+      if(scores[i] != null)
+      {
+        orderedScores.add(scores[i]);
+      }
+    }
+    int numScores = numPlayers - 1;
+    for(int i = 0; i < 4; i++)
+    {
+      if(scores[i] != null)
+      {
+        fill(0, 0, 0, 210);
+        textSize(48 * scaleSize);
+        textAlign(LEFT);
+        if(drawNotSeenKills)
+        {
+          text(orderedScores.poll().toString(), 4 * scaleSize, height - 16 * scaleSize - 48 * numScores * scaleSize);
+        }
+        else
+        {
+          text(orderedScores.poll().toString(), 4 * scaleSize, height - 16 * scaleSize - 48 * numScores * scaleSize);
+        }
+        numScores--;
+      }
+    }
+    for(Bullet currBullet: bullets.values())
+    {
+      currBullet.bullet.update(deltaTime);
+      currBullet.bullet.draw();
+    }  
+    if(saveAfterFrame)
+    {
+      saveFrame("log/" + time() + ".png");
+      saveAfterFrame = false;
+    }
   }
 }
 
@@ -577,20 +617,11 @@ void drawText()
  */
 void attentionUpdate()
 {
-  if(getCurrNumFaces() > 0/*(getCurrNumFaces() > 0 || millis() - controllerUsedTimer < 1000) && millis() - controllerUsedTimer < 15000*/)
-  {
-    looking = true;
-  }
-  else
-  {
-    looking = false;
-  }
-  
-  if(!looking)
+  if(blackout)
   {
     notLookingTasks();
   }
-  else //the user is paying attention
+  else
   {
     lookingTasks();
   }
@@ -640,7 +671,7 @@ void notLookingTasks()
     //since the user isn't looking, add lines to show where the bullets are
     for(Bullet currBullet: bullets.values())
     {
-      bulletTrails.add(new Line(currBullet.prevX, currBullet.prevY, (int)currBullet.bullet.getX(), (int)currBullet.bullet.getY(), color(0), (int)(4 * scaleSize)));
+      bulletTrails.add(new Line(currBullet.prevX, currBullet.prevY, (int)currBullet.bullet.getX(), (int)currBullet.bullet.getY(), color(0, 0, 0, 100), (int)(4 * scaleSize)));
       currBullet.prevX = (int)currBullet.bullet.getX();
       currBullet.prevY = (int)currBullet.bullet.getY();
     }
@@ -655,12 +686,12 @@ void notLookingTasks()
       {
         for(Message m: networkMessages)
         {
-          m.visibleLimit = 20000;
+          m.visibleLimit = 10000;
           m.timeVisible = millis();
         }
       }
     }
-    if(millis() - timeSinceLooking > 1000 && !invincible)
+    if((millis() - timeSinceLooking > 1000 || blackout) && !invincible)
     {
       Network.InvincibleServerMsg invincibleMsg = new Network.InvincibleServerMsg();
       client.sendTCP(invincibleMsg);
@@ -703,7 +734,7 @@ void lookingTasks()
   {
     for(Bullet currBullet: bullets.values())
     {
-      bulletTrails.add(new Line(currBullet.prevX, currBullet.prevY, (int)currBullet.bullet.getX(), (int)currBullet.bullet.getY(), color(0), (int)(4 * scaleSize)));
+      bulletTrails.add(new Line(currBullet.prevX, currBullet.prevY, (int)currBullet.bullet.getX(), (int)currBullet.bullet.getY(), color(0, 0, 0, 100), (int)(4 * scaleSize)));
       currBullet.prevX = (int)currBullet.bullet.getX();
       currBullet.prevY = (int)currBullet.bullet.getY();
     }
@@ -751,7 +782,7 @@ void lookingTasks()
   {
     Network.HitWallMsg hitMsg = wallHitsIt.next();
     Wall hitWall = walls.get(hitMsg.wallID);
-    hitWall.hitCount += 2;
+    hitWall.hitCount += 1;
     if(hitWall.hitCount % 2 == 0 && hitWall.hitCount < 10)
     {
       hitWall.setFrame(hitWall.getFrame() + 1);
@@ -765,20 +796,15 @@ void lookingTasks()
   }
   if(millis() - timeSinceNotLooking > 3000)
   {
+    drawCircles = false;
+    drawNotSeenKills = false;
     for(int i = 0; i < 4; i++)
     {
       if(tanks[i] != null)
       {
         tanks[i].lastSeenHealth = tanks[i].health.percent;
+
       }
-    }
-  }
-  if(millis() - timeSinceNotLooking > 2000)
-  {
-    drawCircles = false;
-    drawNotSeenKills = false;
-    for(int i = 0; i < 4; i++)
-    {
       if(scores[i] != null)
       {
         scores[i].notSeenKills = 0;
@@ -791,7 +817,7 @@ void lookingTasks()
     while(messageIt.hasNext())
     {
       Message m = messageIt.next();
-      if(m.visibleLimit != 20000.0 && networkMessages.size() > 5)
+      if(m.visibleLimit != 10000.0 && networkMessages.size() > 5)
       {
         messageIt.remove();
       }
@@ -896,7 +922,7 @@ void processCollision(Object object)
     if(looking)
     {
       Wall hitWall = walls.get(hitMsg.wallID);
-      hitWall.hitCount += 2;
+      hitWall.hitCount += 1;
       if(hitWall.hitCount % 2 == 0 && hitWall.hitCount < 10)
       {
         hitWall.setFrame(hitWall.getFrame() + 1);
@@ -972,17 +998,6 @@ void createBullet(Object object)
   Bullet b = new Bullet(bullet);
   bullets.put(shootMsg.bulletID, b);
   bulletIDs.put(b, shootMsg.bulletID);
-}
-
-synchronized int getCurrNumFaces()
-{
-  return currNumFaces;
-}
-  
-  
-synchronized void setCurrNumFaces(int faces)
-{
-  currNumFaces = faces;
 }
 
 void keyPressed()

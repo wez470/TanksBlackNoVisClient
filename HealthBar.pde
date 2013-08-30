@@ -17,8 +17,8 @@ class HealthBar
     strokeWeight(4 * scaleSize);
     noStroke();
     //draw yellow last seen bar
-    fill(255, 255, 0);
-    rect(x - 25 * scalePosition, y - 45 * scalePosition, lastSeenHealth / 2 * scalePosition, 9 * scalePosition);
+//    fill(255, 255, 0);
+//    rect(x - 25 * scalePosition, y - 45 * scalePosition, lastSeenHealth / 2 * scalePosition, 9 * scalePosition);
     fill(200, 0, 0);
     //draw red health bar
     rect(x - 25 * scalePosition, y - 45 * scalePosition, percent / 2 * scalePosition, 9 * scalePosition);
